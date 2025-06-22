@@ -104,7 +104,6 @@ class ChessMoveAnalyzer:
             return f"Excellent move! ({data['move']})"
         else:
             best_move = data["best_move"]
-            score_diff = abs(data["score_diff"])
             centipawn_loss = max(0, -data["score_diff"])
             
             quality_text = {
@@ -232,18 +231,6 @@ class ChessGUI:
         self.root.bind("<Right>", lambda e: self.next_move())
         self.root.bind("<Up>", lambda e: self.move_entry.focus())
 
-    def prev_move(self):
-        """Move to previous position in game"""
-        if self.current_move > 0:
-            self.current_move -= 1
-            self.update_display()
-
-    def next_move(self):
-        """Move to next position in game"""
-        if self.current_move < len(self.analyzer.moves):
-            self.current_move += 1
-            self.update_display()
-
     def safe_update_status(self, text):
         """Thread-safe way to update status"""
         if self.root.winfo_exists():
@@ -314,38 +301,24 @@ class ChessGUI:
     def _update_display(self):
         """Actual display update (runs in main thread)"""
         try:
-            # Update move number
-            self.move_number_label.config(text=str(self.current_move + 1))
-            
-            # Highlight modified moves
-            if self.current_move in self.modified_moves:
-                self.move_entry.config(bg="#FFF3CD")
-            else:
-                self.move_entry.config(bg="white")
-            
-            # Update board
-            if self.current_move == 0:
-                board = chess.Board()
-                # Show first move in entry box
-                if len(self.analyzer.moves) > 0:
-                    self.move_var.set(self.analyzer.moves[0])
-            else:
-                if len(self.analyzer.analysis) >= self.current_move:
-                    board = chess.Board(self.analyzer.analysis[self.current_move-1]["position_fen"])
-                    # Show next move in entry box if available
-                    if len(self.analyzer.moves) > self.current_move:
-                        if (len(self.analyzer.analysis) > self.current_move and 
-                            self.analyzer.get_move_quality(self.current_move) != "excellent"):
-                            self.move_var.set(self.analyzer.analysis[self.current_move]["best_move"])
-                        else:
-                            self.move_var.set(self.analyzer.moves[self.current_move])
-                    else:
-                        self.move_var.set("")
-                else:
-                    board = chess.Board()
-            
-            # Generate and display board
-            svg_data = self.generate_svg(board)
+            # Update move number and color
+            move_number = (self.current_move // 2) + 1
+            move_color = "White" if self.current_move % 2 == 0 else "Black"
+            self.move_number_label.config(text=f"{move_number}. {'White' if move_color == 'White' else 'Black'}")
+
+            # Reconstruct board state up to current move
+            board = chess.Board()
+            for i in range(self.current_move):
+                if i < len(self.analyzer.moves):
+                    try:
+                        move = board.parse_san(self.analyzer.moves[i])
+                        board.push(move)
+                    except chess.IllegalMoveError:
+                        print(f"Illegal move at position {i}: {self.analyzer.moves[i]}")
+                        continue
+
+            # Display board
+            svg_data = chess.svg.board(board=board, size=400)
             try:
                 png_data = self.svg_to_png(svg_data)
                 self.photo = ImageTk.PhotoImage(png_data)
@@ -354,19 +327,37 @@ class ChessGUI:
                 print(f"Rendering error: {e}")
                 self.board_label.config(text="Board display unavailable")
 
-            # Update evaluation text
-            self.update_evaluation_text()
-            
+            # Update move entry with next move if available
+            if self.current_move < len(self.analyzer.moves):
+                self.move_var.set(self.analyzer.moves[self.current_move])
+            else:
+                self.move_var.set("")
+
+            # Update evaluation text if analysis exists
+            if 0 < self.current_move <= len(self.analyzer.analysis):
+                move_data = self.analyzer.analysis[self.current_move-1]
+                quality = self.analyzer.get_move_quality(self.current_move-1)
+                eval_text = self.analyzer.get_move_evaluation(self.current_move-1)
+                
+                self.eval_text.delete(1.0, END)
+                self.configure_text_tags()
+                self.eval_text.insert(END, eval_text)
+                first_line_end = eval_text.find('\n') if '\n' in eval_text else len(eval_text)
+                self.eval_text.tag_add(quality, "1.0", f"1.{first_line_end}")
+            else:
+                self.eval_text.delete(1.0, END)
+                self.eval_text.insert(END, "Initial position" if self.current_move == 0 else "Move played, analyzing...")
+
             # Update status and buttons
-            self.status_var.set(f"Move {self.current_move}/{len(self.analyzer.moves)}")
+            self.status_var.set(f"Move {self.current_move + 1}/{len(self.analyzer.moves) + 1}")
             self.prev_button.config(state=NORMAL if self.current_move > 0 else DISABLED)
             self.next_button.config(state=NORMAL if self.current_move < len(self.analyzer.moves) else DISABLED)
-            
+
         except Exception as e:
             print(f"Display update error: {e}")
         finally:
             self.after_id = None
-        
+    
     def update_evaluation_text(self):
         """Update the evaluation text widget"""
         self.eval_text.delete(1.0, END)
@@ -375,7 +366,6 @@ class ChessGUI:
             self.eval_text.insert(END, "Initial position")
             return
             
-        move_data = self.analyzer.analysis[self.current_move-1]
         quality = self.analyzer.get_move_quality(self.current_move-1)
         eval_text = self.analyzer.get_move_evaluation(self.current_move-1)
         
@@ -442,29 +432,17 @@ class ChessGUI:
             self.root.after(1000, lambda: self.move_entry.config(bg="white"))
 
     def next_move(self):
-        """Modified to use custom moves"""
-        if self.current_move < len(self.analyzer.moves):                
-            # Re-analyze with potential custom move
-            self.analyzer.board = chess.Board()
-            for i in range(self.current_move):
-                self.analyzer.board.push_san(self.analyzer.moves[i])
-            
-            self.analyzer.analysis = self.analyzer.analysis[:self.current_move]
-            self.analyzer.analyze_game()
-            
-            # Only proceed if analysis exists for current position
-            if len(self.analyzer.analysis) > self.current_move:
-                self.current_move += 1
-                self.update_display()
-            else:
-                self.status_var.set("Analysis not ready yet")
+        """Move to next position in game"""
+        if self.current_move < len(self.analyzer.moves):
+            self.current_move += 1
+            self.update_display()
 
     def prev_move(self):
         """Move to previous position in game"""
         if self.current_move > 0:
             self.current_move -= 1
             self.update_display()
-
+            
     def save_game(self):
         """Save current game to PGN file"""
         game = chess.pgn.Game()
