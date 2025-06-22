@@ -1,0 +1,4 @@
+chess>=1.11.0
+pillow>=9.0.0
+cairosvg>=2.5.0
+reportlab>=3.0.0
